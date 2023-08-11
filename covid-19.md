@@ -183,6 +183,8 @@ covid_data <- covid_data %>%
   mutate_at(vars(-USMER, -MEDICAL_UNIT, -AGE, -CLASIFFICATION_FINAL), function(.){ifelse(. == 2, 0, .)})
 ```
 
+## Feature Selection
+
 Dropping features with many missing values:
 
 ``` r
@@ -208,10 +210,10 @@ covid_data %>% apply(2, function(.){sum(is.na(.))/nrow(covid_data)})
 covid_data <- covid_data %>% select(-INTUBED, -ICU)
 ```
 
-## Feature Selection
-
 ``` r
-fs <- data.frame(DIED = abs(t(cor(covid_data$DIED, covid_data, use = 'complete.obs'))), row.names = colnames(cor(covid_data$DIED, covid_data, use = 'complete.obs'))) %>% arrange(DIED)
+fs <- data.frame(DIED = abs(t(cor(covid_data$DIED, covid_data, use = 'complete.obs'))), 
+                 row.names = colnames(cor(covid_data$DIED, covid_data, use = 'complete.obs'))) %>% 
+  arrange(DIED)
 ```
 
 I will use the features that are significantly correlated with whether
@@ -232,10 +234,19 @@ covid_data <- covid_data %>% mutate(AGE = (AGE-mean(AGE))/sd(AGE))
 Changing Categorical Variables to Factors
 
 ``` r
-covid_data <- covid_data %>% mutate_at(vars(DIED, MEDICAL_UNIT, CLASIFFICATION_FINAL), as.factor)
+covid_data <- covid_data %>% 
+  mutate_at(vars(DIED, MEDICAL_UNIT, CLASIFFICATION_FINAL), as.factor)
 ```
 
-Training and Testing Data
+Impute missing values
+
+``` r
+covid_data <- covid_data %>% 
+  mutate_at(vars(RENAL_CHRONIC, HIPERTENSION, DIABETES, PNEUMONIA), 
+            function(.){ifelse(is.na(.), mean(., na.rm = TRUE), .)})
+```
+
+Training and Testing Data Split
 
 ``` r
 set.seed(2023)
@@ -245,27 +256,7 @@ train <- covid_data[rows,]
 test <- covid_data[-rows,]
 ```
 
-``` r
-library(tidymodels)
-```
-
-    ## ── Attaching packages ────────────────────────────────────── tidymodels 1.1.0 ──
-
-    ## ✔ broom        1.0.5     ✔ rsample      1.1.1
-    ## ✔ dials        1.2.0     ✔ tune         1.1.1
-    ## ✔ infer        1.0.4     ✔ workflows    1.1.3
-    ## ✔ modeldata    1.1.0     ✔ workflowsets 1.0.1
-    ## ✔ parsnip      1.1.0     ✔ yardstick    1.2.0
-    ## ✔ recipes      1.0.6
-
-    ## ── Conflicts ───────────────────────────────────────── tidymodels_conflicts() ──
-    ## ✖ scales::discard() masks purrr::discard()
-    ## ✖ dplyr::filter()   masks stats::filter()
-    ## ✖ recipes::fixed()  masks stringr::fixed()
-    ## ✖ dplyr::lag()      masks stats::lag()
-    ## ✖ yardstick::spec() masks readr::spec()
-    ## ✖ recipes::step()   masks stats::step()
-    ## • Dig deeper into tidy modeling with R at https://www.tmwr.org
+Logistic Regression
 
 ``` r
 # Train a logistic regression model
@@ -293,24 +284,129 @@ tidy(covidmodel)
     ##    term          estimate penalty
     ##    <chr>            <dbl>   <dbl>
     ##  1 (Intercept)    -2.21         0
-    ##  2 USMER          -0.144        0
-    ##  3 RENAL_CHRONIC   0.437        0
-    ##  4 MEDICAL_UNIT2   0.204        0
-    ##  5 MEDICAL_UNIT3  -0.220        0
-    ##  6 MEDICAL_UNIT4   0.415        0
-    ##  7 MEDICAL_UNIT5  -0.0184       0
-    ##  8 MEDICAL_UNIT6  -0.0853       0
-    ##  9 MEDICAL_UNIT7  -0.787        0
-    ## 10 MEDICAL_UNIT8  -0.536        0
+    ##  2 USMER          -0.128        0
+    ##  3 RENAL_CHRONIC   0.442        0
+    ##  4 MEDICAL_UNIT2   0.336        0
+    ##  5 MEDICAL_UNIT3  -0.223        0
+    ##  6 MEDICAL_UNIT4   0.404        0
+    ##  7 MEDICAL_UNIT5  -0.0172       0
+    ##  8 MEDICAL_UNIT6  -0.0871       0
+    ##  9 MEDICAL_UNIT7  -0.770        0
+    ## 10 MEDICAL_UNIT8  -0.544        0
     ## # ℹ 16 more rows
 
 ``` r
 results <- predict(covidmodel, new_data = test, type = "class")
-results_df <- data.frame(results, actual = test["DIED"])
-table(results_df)
+results_df <- data.frame(results, test["DIED"])
+confusion <- table(results_df) #confusion matrix
+f1 <- function(tp, fp, fn){
+  tp/(tp+(fp+fn)/2)
+}
+f1_1 <- f1(sum(test["DIED"] == 1), confusion[2, 1], confusion[1, 2])
+confusion
 ```
 
     ##            DIED
     ## .pred_class      0      1
-    ##           0 187385   9374
-    ##           1   3245   5753
+    ##           0 190981   9613
+    ##           1   3294   5827
+
+An $F_1$ score of 0.7052321 shows room for improvement!
+
+Undersampling to handle imbalanced dataset
+
+I can see that this is an imbalanced dataset.
+
+``` r
+ggplot(data = covid_data, aes(fill = DIED)) +
+  geom_bar(aes(x = DIED))+
+  ggtitle("Number of samples in each class")+
+  xlab("DIED")+
+  ylab("Samples")+
+  scale_y_continuous(expand = c(0,0))+
+  scale_x_discrete(expand = c(0,0))+
+  theme(legend.position = "none", 
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank())
+```
+
+![](covid-19_files/figure-gfm/unnamed-chunk-14-1.png)<!-- -->
+
+I will use undersampling to handle the unequal distribution of high and
+low risk patients.
+
+``` r
+class_counts <- table(covid_data["DIED"])
+undersample_false <- covid_data %>% filter(DIED == 0) %>% slice_sample(n = class_counts[2])
+undersample_true <- covid_data %>% filter(DIED == 1)
+undersample <- rbind(undersample_false, undersample_true)
+ggplot(data = undersample, aes(fill = DIED)) +
+  geom_bar(aes(x = DIED))+
+  ggtitle("Number of samples in each class after undersampling")+
+  xlab("DIED")+
+  ylab("Samples")+
+  scale_y_continuous(expand = c(0,0))+
+  scale_x_discrete(expand = c(0,0))+
+  theme(legend.position = "none", 
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank())
+```
+
+![](covid-19_files/figure-gfm/unnamed-chunk-15-1.png)<!-- -->
+
+Lets try again!
+
+Training and Testing Data Split
+
+``` r
+set.seed(2023)
+n2 <- dim(undersample)[1]
+rows2 <- sample(1:n2, 0.8*n2)
+train2 <- undersample[rows2,]
+test2 <- undersample[-rows2,]
+```
+
+``` r
+# Train a logistic regression model
+covidmodel2 <- logistic_reg(mixture = double(1), penalty = double(1)) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification") %>%
+  fit(DIED ~ ., data = train2)
+
+# Model summary
+tidy(covidmodel2)
+```
+
+    ## # A tibble: 26 × 3
+    ##    term          estimate penalty
+    ##    <chr>            <dbl>   <dbl>
+    ##  1 (Intercept)     0.202        0
+    ##  2 USMER          -0.176        0
+    ##  3 RENAL_CHRONIC   0.512        0
+    ##  4 MEDICAL_UNIT2   0.210        0
+    ##  5 MEDICAL_UNIT3  -0.207        0
+    ##  6 MEDICAL_UNIT4   0.399        0
+    ##  7 MEDICAL_UNIT5   0.0707       0
+    ##  8 MEDICAL_UNIT6  -0.0351       0
+    ##  9 MEDICAL_UNIT7  -0.700        0
+    ## 10 MEDICAL_UNIT8  -0.360        0
+    ## # ℹ 16 more rows
+
+``` r
+results2 <- predict(covidmodel2, new_data = test2, type = "class")
+results_df2 <- data.frame(results2, test2["DIED"])
+confusion2 <- table(results_df2) #confusion matrix
+f1_2 <- f1(sum(test["DIED"] == 1), confusion2[2, 1], confusion2[1, 2])
+confusion2
+```
+
+    ##            DIED
+    ## .pred_class     0     1
+    ##           0 13734  1180
+    ##           1  1663 14200
+
+An $F_1$ score of 0.9156955 is much better!
